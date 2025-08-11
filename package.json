@@ -1,0 +1,33 @@
+{
+  "name": "cx-award-monitor",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node dist/server.js",
+    "dev": "ts-node src/server.ts",
+    "build": "tsc"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "type": "module",
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^7.0.5",
+    "playwright": "^1.54.2",
+    "zod": "^4.0.17"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.2.1",
+    "@types/nodemailer": "^6.4.17",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}
