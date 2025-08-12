@@ -82,12 +82,21 @@ app.get('/api/search', async (req, res) => {
     const cached = getCached(ymd, from, to, 30 * 60 * 1000);
     if (cached) return res.json(JSON.parse(cached));
 
-    const result = await client.searchSingleDay({ from, to, dateYmd: ymd, adults, children });
+    const result = await client.searchSingleDaySmart({ from, to, dateYmd: ymd, adults, children });
     upsertCache(ymd, from, to, JSON.stringify(result));
     res.json(result);
   } catch (e: any) {
     res.status(500).json({ error: e?.message || 'search failed' });
   }
+});
+
+app.get('/api/status', (_req, res) => {
+  res.json({
+    needsLogin: client.needsLogin,
+    lastError: client.lastError,
+    lastCheckAt: client.lastCheckAt,
+    httpTemplateReady: Boolean((client as any).availabilityUrl && (client as any).baseParams),
+  });
 });
 
 function cabinRank(cabin: 'Y'|'W'|'C'|'F') {

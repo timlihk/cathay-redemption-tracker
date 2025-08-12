@@ -80,7 +80,6 @@ function parseFlights(payload: any): FlightOption[] {
       const leg2J = Number(seg2.cabins?.B?.status || 0);
       const leg2P = Number(seg2.cabins?.N?.status || 0);
       const leg2Y = Number(seg2.cabins?.E?.status || 0) + Number(seg2.cabins?.R?.status || 0);
-      // For connections, availability is min of segments per cabin
       fAvail = Math.min(fAvail, leg2F);
       jAvail = Math.min(jAvail, leg2J);
       pAvail = Math.min(pAvail, leg2P);
@@ -115,6 +114,13 @@ function parseFlights(payload: any): FlightOption[] {
 export class CathayClient {
   private context: BrowserContext | null = null;
 
+  private availabilityUrl: string | null = null;
+  private baseParams: Record<string, string> | null = null;
+
+  public needsLogin = false;
+  public lastError: string | null = null;
+  public lastCheckAt: number | null = null;
+
   async ensureContext(forceHeadful?: boolean) {
     if (this.context) return this.context;
     const browser = await chromium.launchPersistentContext(USER_DATA_DIR, {
@@ -144,7 +150,87 @@ export class CathayClient {
     const page = await ctx.newPage();
     const loginUrl = `https://www.cathaypacific.com/content/cx/${ENTRY_LANG}_${ENTRY_COUNTRY}/sign-in.html`;
     await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
-    // Keep window open for user to authenticate; cookies persist in USER_DATA_DIR
+    this.needsLogin = false;
+  }
+
+  private parseFormBody(body: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    body.split('&').forEach(pair => {
+      const [k, v] = pair.split('=');
+      if (k) out[decodeURIComponent(k)] = decodeURIComponent(v || '');
+    });
+    return out;
+  }
+
+  private encodeFormBody(params: Record<string, string>): string {
+    return Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+  }
+
+  private async httpAvailability(from: string, to: string, dateYmd: string) {
+    if (!this.context || !this.availabilityUrl || !this.baseParams) return { status: 0, data: null } as any;
+    const reqParams = { ...this.baseParams };
+    reqParams.B_DATE_1 = `${dateYmd}0000`;
+    reqParams.B_LOCATION_1 = from;
+    reqParams.E_LOCATION_1 = to;
+    const body = this.encodeFormBody(reqParams);
+    const resp = await this.context.request.post(this.availabilityUrl, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json, text/plain, */*'
+      },
+      data: body
+    });
+    let json: any = null;
+    try {
+      json = await resp.json();
+    } catch {
+      // ignore
+    }
+    return { status: resp.status(), data: json };
+  }
+
+  private captureTemplate(resp: Response) {
+    try {
+      const req = resp.request();
+      const url = resp.url();
+      const method = req.method();
+      if (method === 'POST' && url.includes('/CathayPacificAwardV3/dyn/air/booking/availability')) {
+        const post = req.postData() || '';
+        const parsed = this.parseFormBody(post);
+        if (parsed && parsed.B_DATE_1 && parsed.B_LOCATION_1 && parsed.E_LOCATION_1) {
+          this.availabilityUrl = url;
+          this.baseParams = parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async searchSingleDaySmart(params: { from: string; to: string; dateYmd: string; adults: number; children: number; cabin?: 'Y'|'W'|'C'|'F' }): Promise<SearchResult> {
+    this.lastCheckAt = Date.now();
+    // Try HTTP-first if we have a template
+    if (this.availabilityUrl && this.baseParams) {
+      try {
+        const res = await this.httpAvailability(params.from, params.to, params.dateYmd);
+        if (res.status === 200 && res.data) {
+          const flights = parseFlights(res.data);
+          this.lastError = null;
+          return { date: params.dateYmd, from: params.from, to: params.to, flights };
+        }
+        if (res.status === 401 || res.status === 403) {
+          this.needsLogin = true;
+        }
+      } catch (e: any) {
+        this.lastError = e?.message || 'http-first failed';
+      }
+    }
+    // Fallback to page flow
+    const result = await this.searchSingleDay(params);
+    if (result.error && /login|Access Denied|bot|denied/i.test(result.error)) {
+      this.needsLogin = true;
+    }
+    return result;
   }
 
   async searchSingleDay(params: { from: string; to: string; dateYmd: string; adults: number; children: number; cabin?: 'Y'|'W'|'C'|'F' }): Promise<SearchResult> {
@@ -154,7 +240,9 @@ export class CathayClient {
     const url = buildIbefacadeUrl({ from: params.from, to: params.to, date: params.dateYmd }, { adult: params.adults, child: params.children }, params.cabin || 'Y');
 
     const waitAvailability = page.waitForResponse((resp: Response) => {
-      return resp.request().method() === 'POST' && resp.url().includes('/CathayPacificAwardV3/dyn/air/booking/availability');
+      const hit = resp.request().method() === 'POST' && resp.url().includes('/CathayPacificAwardV3/dyn/air/booking/availability');
+      if (hit) this.captureTemplate(resp);
+      return hit;
     }, { timeout: 45000 }).catch(() => null);
 
     await page.goto(url, { waitUntil: 'domcontentloaded' });
@@ -165,6 +253,7 @@ export class CathayClient {
     if (!resp) {
       result.error = 'No availability response (possible bot check or session required)';
       await page.close();
+      this.lastError = result.error;
       return result;
     }
 
@@ -174,12 +263,14 @@ export class CathayClient {
     } catch (e) {
       result.error = 'Invalid JSON from availability endpoint';
       await page.close();
+      this.lastError = result.error;
       return result;
     }
 
     result.flights = parseFlights(json);
 
     await page.close();
+    this.lastError = null;
     return result;
   }
 }
