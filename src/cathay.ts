@@ -153,6 +153,46 @@ export class CathayClient {
     this.needsLogin = false;
   }
 
+  async reloginWithCredentials(member: string, password: string): Promise<boolean> {
+    // Open sign-in page and perform the membership-number flow.
+    const ctx = await this.ensureContext(true);
+    const page = await ctx.newPage();
+    try {
+      await page.goto(`https://www.cathaypacific.com/cx/${ENTRY_LANG}_${ENTRY_COUNTRY}/sign-in.html`, { waitUntil: 'domcontentloaded' });
+      // Best-effort selectors; may need updates if CX changes DOM
+      // Click membership tab if present
+      await page.waitForTimeout(500);
+      const membershipBtn = await page.locator('button:has-text("membership")').first();
+      if (await membershipBtn.count()) await membershipBtn.click();
+      // Fill member number
+      const memInput = page.locator('input[name*="member"], input[id*="member"], input[placeholder*="membership"]');
+      await memInput.first().fill(member);
+      const contBtn = page.locator('button:has-text("Continue"), button:has-text("continue")');
+      if (await contBtn.count()) await contBtn.first().click();
+      // Fill password
+      const passInput = page.locator('input[type="password"]');
+      await passInput.first().fill(password);
+      const signInBtn = page.locator('button:has-text("Sign in"), button:has-text("sign in")');
+      await signInBtn.first().click();
+      // Wait a bit and verify by calling profile API
+      await page.waitForTimeout(2000);
+      const ok = await page.evaluate(async () => {
+        try {
+          const res = await fetch('https://api.cathaypacific.com/redibe/login/getProfile', { credentials: 'include' });
+          const j = await res.json();
+          return Boolean(j?.membershipNumber);
+        } catch { return false; }
+      });
+      await page.close();
+      this.needsLogin = !ok;
+      return ok;
+    } catch {
+      try { await page.close(); } catch {}
+      this.needsLogin = true;
+      return false;
+    }
+  }
+
   private parseFormBody(body: string): Record<string, string> {
     const out: Record<string, string> = {};
     body.split('&').forEach(pair => {

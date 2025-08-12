@@ -92,6 +92,31 @@ export function listWatches(userId?: number): WatchItem[] {
   }));
 }
 
+export function listWatchesWithCreds(): Array<WatchItem & { userId: number; cathayMember?: string; cathayPassEnc?: string }> {
+  const rows = db.prepare(`
+    SELECT w.*, u.id as user_id, u.cathay_member, u.cathay_pass_enc
+    FROM watches w
+    JOIN users u ON u.id = w.user_id
+    ORDER BY w.id DESC
+  `).all();
+  return (rows as any[]).map(r => ({
+    id: r.id,
+    from: r.from_code,
+    to: r.to_code,
+    startDate: r.start_date,
+    endDate: r.end_date,
+    numAdults: r.num_adults,
+    numChildren: r.num_children,
+    email: r.email,
+    nonstopOnly: r.nonstop_only,
+    minCabin: r.min_cabin ?? undefined,
+    createdAt: r.created_at,
+    userId: r.user_id,
+    cathayMember: r.cathay_member || undefined,
+    cathayPassEnc: r.cathay_pass_enc || undefined,
+  }));
+}
+
 export function upsertCache(date: string, from: string, to: string, payload: string) {
   const now = Date.now();
   const existing = db
