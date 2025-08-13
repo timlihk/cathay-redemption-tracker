@@ -17,7 +17,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
-const client = new CathayClient();
+// Per-user clients are instantiated inside the scheduler loop
 
 const watchSchema = z.object({
   userId: z.number().int().optional(),
@@ -65,8 +65,12 @@ app.get('/api/watch', (req, res) => {
   res.json(listWatches(userId));
 });
 
-app.post('/api/open-login', async (_req, res) => {
+app.post('/api/open-login', async (req, res) => {
   try {
+    const userId = Number(req.body?.userId || req.query?.userId);
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const profileDir = `./pw-data/user-${userId}`;
+    const client = new CathayClient(profileDir);
     await client.openLoginWindow();
     res.json({ ok: true });
   } catch (e: any) {
@@ -102,6 +106,8 @@ app.delete('/api/watch/:id', (req, res) => {
 
 app.get('/api/search', async (req, res) => {
   try {
+    const userId = Number(req.query.userId || 0);
+    if (!userId) return res.status(400).json({ error: 'userId required' });
     const from = String(req.query.from || '').toUpperCase();
     const to = String(req.query.to || '').toUpperCase();
     const date = String(req.query.date || ''); // YYYY-MM-DD
@@ -115,6 +121,8 @@ app.get('/api/search', async (req, res) => {
     const cached = getCached(ymd, from, to, 30 * 60 * 1000);
     if (cached) return res.json(JSON.parse(cached));
 
+    const client = new CathayClient(`./pw-data/user-${userId}`);
+    await client.warmup();
     const result = await client.searchSingleDaySmart({ from, to, dateYmd: ymd, adults, children });
     upsertCache(ymd, from, to, JSON.stringify(result));
     res.json(result);
@@ -124,12 +132,7 @@ app.get('/api/search', async (req, res) => {
 });
 
 app.get('/api/status', (_req, res) => {
-  res.json({
-    needsLogin: client.needsLogin,
-    lastError: client.lastError,
-    lastCheckAt: client.lastCheckAt,
-    httpTemplateReady: Boolean((client as any).availabilityUrl && (client as any).baseParams),
-  });
+  res.json({ message: 'status is per-user; use scheduler logs and UI actions for now' });
 });
 
 function cabinRank(cabin: 'Y'|'W'|'C'|'F') {
@@ -150,9 +153,19 @@ function flightHasCabin(avail: FlightOption['availability'], min: 'Y'|'W'|'C'|'F
 async function runJobOnce() {
   const items = listWatchesWithCreds();
   if (items.length === 0) return;
-  await client.warmup();
+
+  // Group watches by userId and create a per-user client with a unique profile dir
+  const userIdToClient = new Map<number, CathayClient>();
 
   for (const w of items) {
+    if (!userIdToClient.has((w as any).userId)) {
+      const profileDir = `./pw-data/user-${(w as any).userId}`;
+      userIdToClient.set((w as any).userId, new CathayClient(profileDir));
+    }
+    const client = userIdToClient.get((w as any).userId)!;
+
+    await client.warmup();
+
     const start = new Date(w.startDate + 'T00:00:00');
     const end = new Date(w.endDate + 'T00:00:00');
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
@@ -163,19 +176,15 @@ async function runJobOnce() {
         result = JSON.parse(cached);
       } else {
         result = await client.searchSingleDaySmart({ from: w.from, to: w.to, dateYmd: ymd, adults: w.numAdults, children: w.numChildren });
-        // Attempt auto re-login if needed and credentials available
         if ((!result.flights?.length && client.needsLogin) || client.lastError) {
-          if (w.cathayMember && w.cathayPassEnc) {
+          if ((w as any).cathayMember && (w as any).cathayPassEnc) {
             try {
-              const pass = decryptString(w.cathayPassEnc);
-              const ok = await client.reloginWithCredentials(w.cathayMember, pass);
+              const pass = decryptString((w as any).cathayPassEnc);
+              const ok = await client.reloginWithCredentials((w as any).cathayMember, pass);
               if (ok) {
-                // Re-run smart search to refresh template and data
                 result = await client.searchSingleDaySmart({ from: w.from, to: w.to, dateYmd: ymd, adults: w.numAdults, children: w.numChildren });
               }
-            } catch (e) {
-              // ignore; will surface below
-            }
+            } catch {}
           }
         }
         upsertCache(ymd, w.from, w.to, JSON.stringify(result));
